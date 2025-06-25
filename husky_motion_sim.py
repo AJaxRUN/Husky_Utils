@@ -21,6 +21,7 @@ import os
 URDF_PATH = "husky.urdf"
 Z_OFFSET = 0.165
 CALIBRATION_FILE = "husky_calibration.yaml"
+SELECTED_SEQUENCE = "default"
 MOTION_SEQUENCES = dict({ 
     "default" :[
         (0.5, 0.0, 2.0),  # forward 2s
@@ -45,6 +46,15 @@ atexit.register(restore_terminal)
 
 class HuskySim:
     def __init__(self, urdf_path):
+
+        # Data storage
+        self.cmd_vel = (0.0, 0.0)  # (linear_x, angular_z)
+        self.discrepancies = []  # Store (x_error, y_error, timestamp)
+        self.collect_data = False  # Flag to control data collection
+        self.total_predicted_distance = 0.0
+        self.husky_positions = []
+        self.husky_distance = 0.0
+
         # Initialize calibration attributes
         self.offsets = {'x_offset': 0.0, 'y_offset': 0.0, 'yaw_offset': 0.0}
         self.is_calibrated = False
@@ -58,19 +68,9 @@ class HuskySim:
         self.robot = URDF.load(urdf_path)
         self.scene = pyrender.Scene()
         self.link_nodes = {}
-        self.command_count = 0
-        self.sim_positions = []
-        self.real_positions = []
-
-
-        # Data storage
-        self.cmd_vel = (0.0, 0.0)  # (linear_x, angular_z)
-        self.discrepancies = []  # Store (x_error, y_error, timestamp)
-        self.collect_data = False  # Flag to control data collection
-        self.pred_distances = []  # Store predicted distances for total calculation
 
         # Sync predicted pose with real pose at start
-        self.pred_pose = self.real_pose.copy()
+        self.pred_pose = self.huksy_pose.copy()
 
         self.add_ground()
         self.load_robot_meshes()
@@ -78,7 +78,7 @@ class HuskySim:
         # Initialize real-time plotting with enhanced visualization
         plt.ion()
         self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(12, 5))
-        self.ax1.set_title("Real vs Predicted Trajectory")
+        self.ax1.set_title("Husky vs Predicted Trajectory")
         self.ax1.set_xlabel("X (m)")
         self.ax1.set_ylabel("Y (m)")
         self.ax1.grid(True)
@@ -161,14 +161,24 @@ class HuskySim:
         quat = msg.pose.pose.orientation
         _, _, yaw = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
         if self.is_calibrated:
-            self.real_pose = np.array([
+            self.huksy_pose = np.array([
                 pos.x - self.offsets['x_offset'],
                 pos.y - self.offsets['y_offset'],
                 yaw - self.offsets['yaw_offset']
             ])
         else:
-            self.real_pose = np.array([pos.x, pos.y, yaw])
+            self.huksy_pose = np.array([pos.x, pos.y, yaw])
             rospy.logwarn_once("No calibration applied: Using raw odometry data.")
+        
+        if self.collect_data:
+            if len(self.husky_positions) > 0:
+                prev_pose = self.husky_positions[-1]
+                dx = self.huksy_pose[0] - prev_pose[0]
+                dy = self.huksy_pose[1] - prev_pose[1]
+                dist = np.sqrt(dx**2 + dy**2)
+                self.husky_distance += dist
+
+        self.husky_positions.append(self.huksy_pose)
 
     def update_pose(self, dt):
         """Update predicted pose using linear kinematic equations without feedback."""
@@ -181,14 +191,14 @@ class HuskySim:
         # Store distance traveled for each step
         if self.collect_data:
             dist = np.sqrt((x_new - x)**2 + (y_new - y)**2)
-            self.pred_distances.append(dist)
+            self.total_predicted_distance += dist
 
     def update_scene(self):
-        """Update robot visualization in pyrender using real pose."""
+        """Update robot visualization in pyrender using husky's pose."""
         transforms = self.robot.link_fk()
         base_tf = np.eye(4)
-        base_tf[:3, :3] = transforms3d.euler.euler2mat(0, 0, self.real_pose[2])  # Use real_pose
-        base_tf[:3, 3] = [self.real_pose[0], self.real_pose[1], Z_OFFSET]  # Use real_pose
+        base_tf[:3, :3] = transforms3d.euler.euler2mat(0, 0, self.huksy_pose[2])  # Use huksy_pose
+        base_tf[:3, 3] = [self.huksy_pose[0], self.huksy_pose[1], Z_OFFSET]  # Use huksy_pose
         for link_name, node in self.link_nodes.items():
             link = self.robot.link_map[link_name]
             local_tf = transforms.get(link, np.eye(4))
@@ -198,14 +208,14 @@ class HuskySim:
         """Update real-time discrepancy plot with difference visualization."""
         if not self.collect_data:
             return
-        x_err = self.real_pose[0] - self.pred_pose[0]
-        y_err = self.real_pose[1] - self.pred_pose[1]
+        x_err = self.huksy_pose[0] - self.pred_pose[0]
+        y_err = self.huksy_pose[1] - self.pred_pose[1]
         timestamp = rospy.Time.now().to_sec()
-        self.discrepancies.append((x_err, y_err, timestamp, self.real_pose[0], self.real_pose[1], self.pred_pose[0], self.pred_pose[1]))
+        self.discrepancies.append((x_err, y_err, timestamp, self.huksy_pose[0], self.huksy_pose[1], self.pred_pose[0], self.pred_pose[1]))
 
         # Update trajectory plot
-        self.real_line.set_data(np.append(self.real_line.get_xdata(), self.real_pose[0]),
-                               np.append(self.real_line.get_ydata(), self.real_pose[1]))
+        self.real_line.set_data(np.append(self.real_line.get_xdata(), self.huksy_pose[0]),
+                               np.append(self.real_line.get_ydata(), self.huksy_pose[1]))
         self.pred_line.set_data(np.append(self.pred_line.get_xdata(), self.pred_pose[0]),
                                np.append(self.pred_line.get_ydata(), self.pred_pose[1]))
         self.ax1.relim()
@@ -227,9 +237,9 @@ class HuskySim:
         csv_path = "husky_data.csv"
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['timestamp', 'real_x', 'real_y', 'pred_x', 'pred_y', 'x_error', 'y_error'])
-            for x_err, y_err, timestamp, real_x, real_y, pred_x, pred_y in self.discrepancies:
-                writer.writerow([timestamp, real_x, real_y, pred_x, pred_y, x_err, y_err])
+            writer.writerow(['timestamp', 'huksy_x', 'huksy_y', 'pred_x', 'pred_y', 'x_error', 'y_error'])
+            for x_err, y_err, timestamp, huksy_x, huksy_y, pred_x, pred_y in self.discrepancies:
+                writer.writerow([timestamp, huksy_x, huksy_y, pred_x, pred_y, x_err, y_err])
         rospy.loginfo(f"Data saved to {csv_path}")
 
     def send_cmd(self, linear_x, angular_z, duration):
@@ -254,8 +264,8 @@ class HuskySim:
         self.real_line.set_data([], [])  # Clear plots
         self.pred_line.set_data([], [])
         self.dist_err_line.set_data([], [])
-        self.pred_distances = []  # Clear distance data
-        sequence = MOTION_SEQUENCES['default']
+        self.total_predicted_distance = 0  # Clear distance data
+        sequence = MOTION_SEQUENCES[SELECTED_SEQUENCE]
         
         for linear_x, angular_z, duration in sequence:
             if rospy.is_shutdown():
@@ -263,9 +273,9 @@ class HuskySim:
             self.send_cmd(linear_x, angular_z, duration)
         self.collect_data = False
         self.save_data()
-        # Calculate and print total predicted distance
-        total_distance = sum(self.pred_distances)
-        rospy.loginfo(f"Estimated total distance traveled by predicted trajectory: {total_distance:.2f} m")
+
+        rospy.loginfo(f"Estimated total distance traveled by predicted trajectory: {self.total_predicted_distance:.2f} m")
+        rospy.loginfo(f"Actual total distance traveled by Husky (odometry): {self.husky_distance:.2f} m")
 
     def keyboard_listener(self):
         """Listen for 'c' key to trigger motion sequence."""
