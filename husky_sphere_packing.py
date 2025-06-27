@@ -19,36 +19,38 @@ def generate_grid(center, x_count, y_count, z_count, spacing):
 
 def add_spheres_to_link(link_name, centers, radius):
     if isinstance(centers[0], list):  # multiple centers
-        return [{ "center": centers, "radius": radius }]
+        return [{"center": centers, "radius": radius}]
     else:  # single center
-        return [{ "center": centers, "radius": radius }]
+        return [{"center": centers, "radius": radius}]
 
 def save_yaml(sphere_dict, file_path='husky_spheres.yaml'):
-    # Custom YAML Dumper to format lists with proper spacing and precision
+    # Custom YAML Dumper to format lists and floats
     class CustomDumper(yaml.Dumper):
+        def represent_float(self, data):
+            return self.represent_scalar('tag:yaml.org,2002:float', f"{data:.3f}")
+        
         def represent_list(self, data):
             if isinstance(data, list) and all(isinstance(item, (int, float)) for item in data):
-                formatted = [f"{item: .4f}" if isinstance(item, float) else str(item) for item in data]
-                return self.represent_sequence('tag:yaml.org,2002:seq', formatted, flow_style=True)
-            return super().represent_list(data)
+                return self.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
+            return super().represent_sequence('tag:yaml.org,2002:seq', data)
 
+    CustomDumper.add_representer(float, CustomDumper.represent_float)
     CustomDumper.add_representer(list, CustomDumper.represent_list)
 
-    # Add comments to the YAML structure
+    # Structure YAML data to match fetch_spheres.yaml
     yaml_data = {}
     for link_name, spheres in sphere_dict.items():
-        if link_name == "base_link":
-            comment = "The base of the robot"
-        elif link_name == "torso_lift_link":
-            comment = "the torso of the robot"
-        elif link_name == "head_pan_link":
-            comment = "the head of the robot"
-        else:
-            comment = f"the {link_name} of the robot"
-        yaml_data[f"# {comment}\n{link_name}"] = spheres
+        yaml_data[link_name] = spheres
 
     with open(file_path, 'w') as f:
-        yaml.dump(yaml_data, f, Dumper=CustomDumper, sort_keys=False, default_flow_style=None, allow_unicode=True)
+        # Write comment and data to match fetch_spheres.yaml
+        for link_name in sphere_dict.keys():
+            if link_name == "base_link":
+                f.write("# The base of the robot\n")
+            else:
+                f.write(f"# the {link_name} of the robot\n")
+            yaml.dump({link_name: sphere_dict[link_name]}, f, Dumper=CustomDumper, sort_keys=False, default_flow_style=None, allow_unicode=True)
+            f.write("\n")  # Add newline between sections if multiple links
     print(f"YAML saved to: {file_path}")
 
 def visualize_husky_and_spheres(sphere_data, urdf_path='husky.urdf'):
@@ -83,12 +85,16 @@ def visualize_husky_and_spheres(sphere_data, urdf_path='husky.urdf'):
     except KeyboardInterrupt:
         p.disconnect()
 
-
+# Sphere data for Husky
 sphere_data = {}
 
-# Add grid
-chassis_grid = generate_grid(center=[0.0, 0.0, 0.2], x_count=5, y_count=4, z_count=2, spacing=[0.2, 0.2, 0.2])
-sphere_data["chassis_link"] = add_spheres_to_link("chassis_link", chassis_grid, radius=0.15)
+# Add spheres for base_link (chassis) with original grid and spacing
+base_grid = generate_grid(
+    center=[0.0, 0.0, 0.2],  # Original center
+    x_count=5, y_count=4, z_count=2,  # Original grid counts
+    spacing=[0.2, 0.2, 0.2]  # Original spacing
+)
+sphere_data["base_link"] = add_spheres_to_link("base_link", base_grid, radius=0.15)  # Original radius
 
 # Export YAML
 save_yaml(sphere_data, "husky_spheres.yaml")
